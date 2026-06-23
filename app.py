@@ -72,11 +72,23 @@ def read_card_name_ocr(image_b64: str) -> str | None:
         print(f"Image size: {w}x{h}")
 
         # Try multiple crop zones and pick the best result
-        crops = [
-            (60,  48, 400,  82),
-            (60,  45, 400,  78),
-            (60,  52, 400,  85),
-        ]
+        if w >= 600:
+            crops = [
+                (60,  48, 400,  82),
+                (60,  45, 400,  78),
+                (60,  52, 400,  85),
+            ]
+        else:
+            if w < 400:
+                scale = 400 // w + 1
+                img = img.resize((w * scale, h * scale), Image.LANCZOS)
+                w, h = img.size
+                print(f"Upscaled to: {w}x{h}")
+            crops = [
+                (int(w*0.05), int(h*0.04), int(w*0.80), int(h*0.13)),
+                (int(w*0.05), int(h*0.02), int(w*0.80), int(h*0.11)),
+                (int(w*0.05), int(h*0.06), int(w*0.80), int(h*0.15)),
+            ]
 
         best = ""
         for box in crops:
@@ -187,7 +199,55 @@ def delete_card(card_id: int):
     con.execute("DELETE FROM cards WHERE id = ?", (card_id,))
     con.commit()
     con.close()
+def update_quantity(card_id: int, delta: int):
+    con = get_db()
+    row = con.execute("SELECT quantity FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if row:
+        new_qty = row["quantity"] + delta
+        if new_qty <= 0:
+            con.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+        else:
+            con.execute("UPDATE cards SET quantity = ? WHERE id = ?", (new_qty, card_id))
+        con.commit()
+    con.close()
 
+def get_printings(card_name: str) -> list[dict]:
+    safe = card_name.strip().replace(" ", "+")
+    url = f"https://api.scryfall.com/cards/search?q=!%22{safe}%22&unique=prints&order=released"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+            return data.get("data", [])
+    except Exception as e:
+        print(f"Printings error: {e}")
+        return []
+
+def switch_printing(card_id: int, scryfall_card: dict):
+    colors, color_identity = parse_colors(scryfall_card)
+    image_url = (
+        scryfall_card.get("image_uris", {}).get("normal")
+        or scryfall_card.get("image_uris", {}).get("small", "")
+    )
+    con = get_db()
+    con.execute("""UPDATE cards SET
+        mana_cost=?, cmc=?, colors=?, color_identity=?, type_line=?,
+        set_name=?, rarity=?, scryfall_id=?, image_url=?
+        WHERE id=?""", (
+        scryfall_card.get("mana_cost", ""),
+        scryfall_card.get("cmc", 0),
+        colors, color_identity,
+        scryfall_card.get("type_line", ""),
+        scryfall_card.get("set_name", ""),
+        scryfall_card.get("rarity", ""),
+        scryfall_card.get("id"),
+        image_url,
+        card_id,
+    ))
+    con.commit()
+    row = con.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+    con.close()
+    return dict(row)
 def export_csv() -> str:
     cards = get_collection()
     out = io.StringIO()
@@ -237,6 +297,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
         elif path == "/api/config":
             self.send_json({"ocr_available": ocr_available()})
+        elif path == "/api/printings":
+            name = qs.get("name", [""])[0]
+            self.send_json(get_printings(name))
         else:
             self.send_response(404); self.end_headers()
 
@@ -260,7 +323,6 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"error": "No image or name provided."}, 400)
                 return
-
             scryfall = scryfall_search(card_name)
             if not scryfall or scryfall.get("object") == "error":
                 self.send_json({
@@ -276,8 +338,19 @@ class Handler(BaseHTTPRequestHandler):
             delete_card(int(body["id"]))
             self.send_json({"success": True})
 
+        elif path == "/api/quantity":
+            body = json.loads(self.read_body())
+            update_quantity(int(body["id"]), int(body["delta"]))
+            self.send_json({"success": True})
+
+        elif path == "/api/switch-printing":
+            body = json.loads(self.read_body())
+            updated = switch_printing(int(body["id"]), body["printing"])
+            self.send_json({"success": True, "card": updated})
+
         else:
             self.send_response(404); self.end_headers()
+
 
     def serve_file(self, filename, content_type):
         try:
