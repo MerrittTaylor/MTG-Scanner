@@ -26,7 +26,7 @@ def init_db():
     con = sqlite3.connect(DB_PATH)
     con.execute("""
         CREATE TABLE IF NOT EXISTS cards (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+           id             INTEGER PRIMARY KEY AUTOINCREMENT,
             name           TEXT NOT NULL,
             mana_cost      TEXT,
             cmc            REAL,
@@ -38,10 +38,18 @@ def init_db():
             quantity       INTEGER DEFAULT 1,
             scryfall_id    TEXT,
             image_url      TEXT,
+            price_usd      TEXT,
+            price_foil     TEXT,
             added_at       TEXT
         )
     """)
     con.commit()
+
+    for col in [("price_usd", "TEXT"), ("price_foil", "TEXT")]:
+        try:
+            con.execute(f"ALTER TABLE cards ADD COLUMN {col[0]} {col[1]}")
+        except:
+            pass
     con.close()
 
 def get_db():
@@ -156,8 +164,8 @@ def add_or_increment(scryfall_card: dict) -> dict:
         cur = con.execute(
             """INSERT INTO cards
                (name, mana_cost, cmc, colors, color_identity, type_line,
-                set_name, rarity, quantity, scryfall_id, image_url, added_at)
-               VALUES (?,?,?,?,?,?,?,?,1,?,?,?)""",
+                set_name, rarity, quantity, scryfall_id, image_url, price_usd, price_foil, added_at)
+               VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?)""",
             (
                 scryfall_card.get("name"),
                 scryfall_card.get("mana_cost", ""),
@@ -167,8 +175,10 @@ def add_or_increment(scryfall_card: dict) -> dict:
                 scryfall_card.get("type_line", ""),
                 scryfall_card.get("set_name", ""),
                 scryfall_card.get("rarity", ""),
-                scryfall_card.get("id"),
+             	scryfall_card.get("id"),
                 image_url,
+                scryfall_card.get("prices", {}).get("usd", ""),
+                scryfall_card.get("prices", {}).get("usd_foil", ""),
                 datetime.now().isoformat(timespec="seconds"),
             )
         )
@@ -232,7 +242,7 @@ def switch_printing(card_id: int, scryfall_card: dict):
     con = get_db()
     con.execute("""UPDATE cards SET
         mana_cost=?, cmc=?, colors=?, color_identity=?, type_line=?,
-        set_name=?, rarity=?, scryfall_id=?, image_url=?
+        set_name=?, rarity=?, scryfall_id=?, image_url=?, price_usd=?, price_foil=?
         WHERE id=?""", (
         scryfall_card.get("mana_cost", ""),
         scryfall_card.get("cmc", 0),
@@ -242,19 +252,127 @@ def switch_printing(card_id: int, scryfall_card: dict):
         scryfall_card.get("rarity", ""),
         scryfall_card.get("id"),
         image_url,
+        scryfall_card.get("prices", {}).get("usd", ""),
+        scryfall_card.get("prices", {}).get("usd_foil", ""),
         card_id,
     ))
     con.commit()
     row = con.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
     con.close()
     return dict(row)
+GUILD_NAMES = {
+    frozenset(["White", "Blue"]): "Azorius",
+    frozenset(["White", "Black"]): "Orzhov",
+    frozenset(["White", "Red"]): "Boros",
+    frozenset(["White", "Green"]): "Selesnya",
+    frozenset(["Blue", "Black"]): "Dimir",
+    frozenset(["Blue", "Red"]): "Izzet",
+    frozenset(["Blue", "Green"]): "Simic",
+    frozenset(["Black", "Red"]): "Rakdos",
+    frozenset(["Black", "Green"]): "Golgari",
+    frozenset(["Red", "Green"]): "Gruul",
+    frozenset(["White", "Blue", "Black"]): "Esper",
+    frozenset(["White", "Blue", "Red"]): "Jeskai",
+    frozenset(["White", "Blue", "Green"]): "Bant",
+    frozenset(["White", "Black", "Red"]): "Mardu",
+    frozenset(["White", "Black", "Green"]): "Abzan",
+    frozenset(["White", "Red", "Green"]): "Naya",
+    frozenset(["Blue", "Black", "Red"]): "Grixis",
+    frozenset(["Blue", "Black", "Green"]): "Sultai",
+    frozenset(["Blue", "Red", "Green"]): "Temur",
+    frozenset(["Black", "Red", "Green"]): "Jund",
+    frozenset(["White", "Blue", "Black", "Red"]): "Artifice",
+    frozenset(["White", "Blue", "Black", "Green"]): "Chaos",
+    frozenset(["White", "Blue", "Red", "Green"]): "Altruism",
+    frozenset(["White", "Black", "Red", "Green"]): "Growth",
+    frozenset(["Blue", "Black", "Red", "Green"]): "Aggression",
+    frozenset(["White", "Blue", "Black", "Red", "Green"]): "Five Color",
+}
+
+COLOR_SORT_ORDER = [
+    "Colorless", "White", "Blue", "Black", "Red", "Green",
+    "Azorius", "Dimir", "Rakdos", "Gruul", "Selesnya",
+    "Orzhov", "Izzet", "Golgari", "Boros", "Simic",
+    "Bant", "Esper", "Grixis", "Jund", "Naya",
+    "Mardu", "Temur", "Abzan", "Jeskai", "Sultai",
+    "Artifice", "Chaos", "Altruism", "Growth", "Aggression",
+    "Five Color",
+]
+
+def get_guild_name(color_identity: str) -> str:
+    if not color_identity or color_identity == "Colorless":
+        return "Colorless"
+    colors = frozenset(c.strip() for c in color_identity.split(","))
+    if len(colors) == 1:
+        return next(iter(colors))
+    return GUILD_NAMES.get(colors, color_identity)
+
 def export_csv() -> str:
     cards = get_collection()
+    if not cards:
+        return ""
+
+    export_fields = ["name", "mana_cost", "cmc", "guild", "type_line", "set_name", "rarity", "quantity", "price_usd", "price_foil", "total_value", "added_at"]
+
+    TYPE_ORDER = [
+        "Creature",
+        "Enchantment Creature",
+        "Enchantment",
+        "Planeswalker",
+        "Artifact Creature",
+        "Artifact",
+        "Instant",
+        "Sorcery",
+        "Land",
+        "Battle",
+    ]
+
+    def get_type_rank(type_line: str) -> int:
+        if not type_line:
+            return 99
+        # Check combined types first before single types
+        if "Enchantment" in type_line and "Creature" in type_line:
+            return TYPE_ORDER.index("Enchantment Creature")
+        if "Artifact" in type_line and "Creature" in type_line:
+            return TYPE_ORDER.index("Artifact Creature")
+        for i, t in enumerate(TYPE_ORDER):
+            if t in type_line:
+                return i
+        return 99
+
+    def sort_key(c):
+        guild = get_guild_name(c.get("color_identity", ""))
+        try:
+            color_rank = COLOR_SORT_ORDER.index(guild)
+        except ValueError:
+            color_rank = 99
+        type_rank = get_type_rank(c.get("type_line", ""))
+        name = c.get("name", "")
+        set_name = c.get("set_name", "")
+        return (color_rank, type_rank, set_name, name)
+
+    cards_sorted = sorted(cards, key=sort_key)
+
     out = io.StringIO()
-    if cards:
-        writer = csv.DictWriter(out, fieldnames=cards[0].keys())
-        writer.writeheader()
-        writer.writerows(cards)
+    writer = csv.DictWriter(out, fieldnames=export_fields)
+    writer.writeheader()
+    for c in cards_sorted:
+        price = float(c["price_usd"]) if c.get("price_usd") else 0.0
+        foil  = float(c["price_foil"]) if c.get("price_foil") else 0.0
+        writer.writerow({
+            "name": c["name"],
+            "mana_cost": c["mana_cost"],
+            "cmc": int(c["cmc"]) if c["cmc"] == int(c["cmc"]) else c["cmc"],
+            "guild": get_guild_name(c.get("color_identity", "")),
+            "type_line": c["type_line"],
+            "set_name": c["set_name"],
+            "rarity": c["rarity"],
+            "quantity": c["quantity"],
+            "price_usd": f"${price:.2f}" if price else "",
+            "price_foil": f"${foil:.2f}" if foil else "",
+            "total_value": f"${price * c['quantity']:.2f}" if price else "",
+            "added_at": c["added_at"],
+        })
     return out.getvalue()
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────
