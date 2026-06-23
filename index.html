@@ -530,7 +530,8 @@ function colorHex(c) {
 function renderGrid(cards) {
   const grid = document.getElementById('card-grid');
   const total = cards.reduce((s, c) => s + c.quantity, 0);
-  document.getElementById('stats').textContent = `${cards.length} unique · ${total} total`;
+  const totalValue = cards.reduce((s, c) => s + (parseFloat(c.price_usd) || 0) * c.quantity, 0);
+  document.getElementById('stats').textContent = `${cards.length} unique · ${total} total · $${totalValue.toFixed(2)} est. value`;
   if (!cards.length) {
     grid.innerHTML = `<div class="empty-state"><div class="empty-icon">🔮</div><div>No cards yet - scan your first card!</div></div>`;
     return;
@@ -546,6 +547,10 @@ function renderGrid(cards) {
         <div class="card-name">${c.name}</div>
         <div class="card-meta">${c.rarity || ''} · ${c.set_name || ''}</div>
         <div class="card-mana">${c.mana_cost || ''}</div>
+        <div style="display:flex;gap:8px;margin-top:4px;font-size:11px">
+          ${c.price_usd ? `<span style="color:#7dd9a3">$${parseFloat(c.price_usd).toFixed(2)}</span>` : ''}
+          ${c.price_foil ? `<span style="color:#c9a84c">✦ $${parseFloat(c.price_foil).toFixed(2)}</span>` : ''}
+        </div>
       </div>
       <div class="card-actions" style="flex-direction:column;gap:6px">
         <div style="display:flex;gap:6px;align-items:center">
